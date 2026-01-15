@@ -146,6 +146,7 @@ def load_oras(
         # Reasonable defaults; these can be tuned based on typical ORAS5
         chunks = {"x": 200, "y": 200, "deptht": 75}
     elif not use_dask_chunks:
+        # Disable dask chunking entirely (load as a single chunk).
         chunks = None
     logging.info(f"Opening ORAS5 file {file_path} for variable {variable_name}")
     ds = xr.open_dataset(
@@ -317,6 +318,66 @@ def build_regridder(
         ignore_degenerate=ignore_degenerate,
     )
     return regridder
+
+
+def subset_oras_to_target(
+    sal_da: xr.DataArray,
+    temp_da: xr.DataArray,
+    nav_lon: xr.DataArray,
+    nav_lat: xr.DataArray,
+    XC: xr.DataArray,
+    YC: xr.DataArray,
+    margin_deg: float = 1.0,
+) -> tuple[xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray]:
+    """Subset ORAS5 data to a bounding box around the target grid.
+
+    Parameters
+    ----------
+    sal_da, temp_da : xr.DataArray
+        ORAS5 salinity and temperature (time, depth, y, x).
+    nav_lon, nav_lat : xr.DataArray
+        ORAS5 longitude/latitude on the native grid (y, x).
+    XC, YC : xr.DataArray
+        MITgcm target longitude/latitude grids (Y, X).
+    margin_deg : float, default 1.0
+        Degrees to expand the target bounding box on each side.
+
+    Returns
+    -------
+    tuple of xr.DataArray
+        (sal_subset, temp_subset, nav_lon_subset, nav_lat_subset).
+    """
+    lon_min = float(XC.min()) - margin_deg
+    lon_max = float(XC.max()) + margin_deg
+    lat_min = float(YC.min()) - margin_deg
+    lat_max = float(YC.max()) + margin_deg
+    mask = (
+        (nav_lon >= lon_min)
+        & (nav_lon <= lon_max)
+        & (nav_lat >= lat_min)
+        & (nav_lat <= lat_max)
+    )
+    if not np.any(mask):
+        logging.warning("No ORAS5 points found within target bounding box; skipping subsetting.")
+        return sal_da, temp_da, nav_lon, nav_lat
+    y_idx, x_idx = np.where(mask)
+    y_min, y_max = int(y_idx.min()), int(y_idx.max())
+    x_min, x_max = int(x_idx.min()), int(x_idx.max())
+    y_dim, x_dim = nav_lon.dims
+    logging.info(
+        "Subsetting ORAS5 grid to y=%s:%s, x=%s:%s (margin=%s°)",
+        y_min,
+        y_max,
+        x_min,
+        x_max,
+        margin_deg,
+    )
+    subset_sel = {y_dim: slice(y_min, y_max + 1), x_dim: slice(x_min, x_max + 1)}
+    sal_sub = sal_da.isel(subset_sel)
+    temp_sub = temp_da.isel(subset_sel)
+    nav_lon_sub = nav_lon.isel(subset_sel)
+    nav_lat_sub = nav_lat.isel(subset_sel)
+    return sal_sub, temp_sub, nav_lon_sub, nav_lat_sub
 
 
 def regrid_horizontal(
@@ -632,6 +693,12 @@ def main() -> None:
         help="Disable dask chunking when opening ORAS5 files.",
     )
     parser.add_argument(
+        "--subset-margin",
+        type=float,
+        default=1.0,
+        help="Degrees to expand target bbox when subsetting ORAS5 data.",
+    )
+    parser.add_argument(
         "--verbose",
         type=int,
         choices=[0, 1, 2],
@@ -658,8 +725,10 @@ def main() -> None:
     # Load grid
     XC, YC, RC, HFacC = load_grid(args.grid_file)
     # Load ORAS5 variables
+    # Chunking controls for ORAS5 inputs: user override or disable dask chunks.
     oras_chunks = None
     if args.oras_chunks:
+        # Map CLI order (Y, X, DEPTH) to ORAS5 dimension names.
         oras_chunks = {"y": args.oras_chunks[0], "x": args.oras_chunks[1], "deptht": args.oras_chunks[2]}
     use_dask_chunks = not args.no_dask_chunks
     sal_da = load_oras(args.oras_s_file, "vosaline", chunks=oras_chunks, use_dask_chunks=use_dask_chunks)
@@ -674,6 +743,15 @@ def main() -> None:
     if nav_lon is None or nav_lat is None:
         raise KeyError("Could not find nav_lon/nav_lat coordinates in ORAS5 file")
     nav_lon_shifted = unify_longitude(nav_lon, XC)
+    sal_da, temp_da, nav_lon_shifted, nav_lat = subset_oras_to_target(
+        sal_da,
+        temp_da,
+        nav_lon_shifted,
+        nav_lat,
+        XC,
+        YC,
+        margin_deg=args.subset_margin,
+    )
     # Build regridders
     bilinear = build_regridder(
         nav_lon_shifted,
