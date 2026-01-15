@@ -236,6 +236,7 @@ def build_regridder(
     periodic: Optional[bool] = None,
     weights_path: Optional[str] = None,
     ignore_degenerate: bool = True,
+    output_chunks: Optional[dict] = None,
 ) -> xe.Regridder:
     """Build an xESMF regridder between the ORAS5 and MITgcm grids.
 
@@ -257,6 +258,9 @@ def build_regridder(
     ignore_degenerate : bool, default True
         If True, instruct ESMF to ignore degenerate cells in the source
         grid (e.g., NaN or duplicated coordinates) when building weights.
+    output_chunks : dict, optional
+        Optional chunk sizes for the regridded output. Keys should match
+        the target grid dimension names (e.g., {"Y": 200, "X": 200}).
 
     Returns
     -------
@@ -297,6 +301,7 @@ def build_regridder(
         filename=filename,
         reuse_weights=reuse,
         ignore_degenerate=ignore_degenerate,
+        output_chunks=output_chunks,
     )
     return regridder
 
@@ -605,6 +610,13 @@ def main() -> None:
     parser.add_argument("--out-bin-theta", required=True, help="Output MITgcm binary path for temperature")
     parser.add_argument("--out-bin-salt", required=True, help="Output MITgcm binary path for salinity")
     parser.add_argument(
+        "--output-chunks",
+        nargs=2,
+        type=int,
+        metavar=("Y", "X"),
+        help="Optional output chunk sizes for regridding (target grid Y X)",
+    )
+    parser.add_argument(
         "--weights",
         default=None,
         help="Optional path to xESMF weights file for regridding",
@@ -627,8 +639,32 @@ def main() -> None:
         raise KeyError("Could not find nav_lon/nav_lat coordinates in ORAS5 file")
     nav_lon_shifted = unify_longitude(nav_lon, XC)
     # Build regridders
-    bilinear = build_regridder(nav_lon_shifted, nav_lat, XC, YC, method="bilinear", periodic=None, weights_path=args.weights)
-    nearest = build_regridder(nav_lon_shifted, nav_lat, XC, YC, method="nearest_s2d", periodic=None, weights_path=None)
+    output_chunks = None
+    if args.output_chunks:
+        output_chunks = {
+            YC.dims[0]: args.output_chunks[0],
+            XC.dims[1]: args.output_chunks[1],
+        }
+    bilinear = build_regridder(
+        nav_lon_shifted,
+        nav_lat,
+        XC,
+        YC,
+        method="bilinear",
+        periodic=None,
+        weights_path=args.weights,
+        output_chunks=output_chunks,
+    )
+    nearest = build_regridder(
+        nav_lon_shifted,
+        nav_lat,
+        XC,
+        YC,
+        method="nearest_s2d",
+        periodic=None,
+        weights_path=None,
+        output_chunks=output_chunks,
+    )
     # Extract the requested time index
     sal_t = sal_da.isel({sal_da.dims[0]: args.time_index})
     temp_t = temp_da.isel({temp_da.dims[0]: args.time_index})
