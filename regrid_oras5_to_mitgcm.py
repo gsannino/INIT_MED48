@@ -377,31 +377,34 @@ def interpolate_column(
         return np.full_like(z_mit, np.nan, dtype=float)
     z_valid = z_oras[valid]
     v_valid = values[valid]
+    sort_idx = np.argsort(z_valid)
+    z_sorted = z_valid[sort_idx]
+    v_sorted = v_valid[sort_idx]
     # If there's only one valid point, replicate it everywhere
-    if v_valid.size == 1:
-        out = np.full_like(z_mit, v_valid[0], dtype=float)
+    if v_sorted.size == 1:
+        out = np.full_like(z_mit, v_sorted[0], dtype=float)
     else:
         try:
-            interp_func = PchipInterpolator(z_valid, v_valid, extrapolate=True)
+            interp_func = PchipInterpolator(z_sorted, v_sorted, extrapolate=True)
         except Exception:
             # Fallback to linear
             interp_func = interp1d(
-                z_valid,
-                v_valid,
+                z_sorted,
+                v_sorted,
                 kind="linear",
                 bounds_error=False,
-                fill_value=(v_valid[0], v_valid[-1]),
+                fill_value=(v_sorted[0], v_sorted[-1]),
             )
         out = interp_func(z_mit)
     if clamp_bottom:
         # Clamp values below the deepest observation to the deepest value
-        deepest_depth = z_valid.max()
-        deepest_val = v_valid[-1]
+        deepest_depth = z_sorted[-1]
+        deepest_val = v_sorted[-1]
         mask = z_mit > deepest_depth
         out = np.where(mask, deepest_val, out)
         # Clamp above the shallowest to the shallowest value
-        shallowest_depth = z_valid.min()
-        shallowest_val = v_valid[0]
+        shallowest_depth = z_sorted[0]
+        shallowest_val = v_sorted[0]
         mask_top = z_mit < shallowest_depth
         out = np.where(mask_top, shallowest_val, out)
     return out
