@@ -791,7 +791,7 @@ def main() -> None:
     report_stats("Salinity after vertical interpolation", sal_masked)
     report_stats("Temperature after vertical interpolation", temp_masked)
     # Verify shapes
-    expected_shape = (RC.size, YC.shape[0], XC.shape[1])
+    expected_shape = HFacC.shape
     if sal_masked.shape != expected_shape:
         raise ValueError(f"Salinity shape {sal_masked.shape} does not match expected {expected_shape}")
     if temp_masked.shape != expected_shape:
