@@ -264,9 +264,13 @@ def build_regridder(
         Configured regridder object.
     """
     # Build minimal xarray datasets required by xESMF
+    src_lon = nav_lon.data
+    src_lat = nav_lat.data
+    src_mask = np.isfinite(src_lon) & np.isfinite(src_lat)
     ds_in = xr.Dataset({
-        "lon": (nav_lon.dims, nav_lon.data),
-        "lat": (nav_lat.dims, nav_lat.data),
+        "lon": (nav_lon.dims, src_lon),
+        "lat": (nav_lat.dims, src_lat),
+        "mask": (nav_lon.dims, src_mask.astype(np.int8)),
     })
     ds_out = xr.Dataset({
         "lon": (XC.dims, XC.data),
