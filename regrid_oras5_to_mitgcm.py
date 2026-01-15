@@ -92,16 +92,29 @@ import xesmf as xe
 from scipy.interpolate import PchipInterpolator, interp1d
 
 
-def configure_logging() -> None:
-    """Configure a basic logger for console output."""
+def configure_logging(verbosity: int = 1) -> None:
+    """Configure a basic logger for console output.
+
+    Parameters
+    ----------
+    verbosity : int, default 1
+        Verbosity level: 0 = warnings only, 1 = info, 2 = debug.
+    """
+    level_map = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+    level = level_map.get(verbosity, logging.INFO)
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(asctime)s %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
 
-def load_oras(file_path: str, variable_name: str, chunks: Optional[dict] = None) -> xr.DataArray:
+def load_oras(
+    file_path: str,
+    variable_name: str,
+    chunks: Optional[dict] = None,
+    use_dask_chunks: bool = True,
+) -> xr.DataArray:
     """Load an ORAS5 variable as an xarray DataArray.
 
     Parameters
@@ -113,6 +126,9 @@ def load_oras(file_path: str, variable_name: str, chunks: Optional[dict] = None)
     chunks : dict, optional
         Dictionary of chunks for dask.  If None, a default chunking
         scheme is used when dask is available.
+    use_dask_chunks : bool, default True
+        If False, disable chunking and load the dataset without dask
+        chunks to avoid performance warnings from mismatched chunks.
 
     Returns
     -------
@@ -121,9 +137,17 @@ def load_oras(file_path: str, variable_name: str, chunks: Optional[dict] = None)
         depth dimensions ordered as (time, depth, y, x).  Missing
         values are converted to NaN.
     """
-    if chunks is None and DASK_AVAILABLE:
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(
+            f"ORAS5 file not found: {file_path}. "
+            "Please verify the path passed via --oras-s-file/--oras-t-file."
+        )
+    if chunks is None and DASK_AVAILABLE and use_dask_chunks:
         # Reasonable defaults; these can be tuned based on typical ORAS5
         chunks = {"x": 200, "y": 200, "deptht": 75}
+    elif not use_dask_chunks:
+        # Disable dask chunking entirely (load as a single chunk).
+        chunks = None
     logging.info(f"Opening ORAS5 file {file_path} for variable {variable_name}")
     ds = xr.open_dataset(
         file_path,
@@ -230,6 +254,7 @@ def build_regridder(
     method: str = "bilinear",
     periodic: Optional[bool] = None,
     weights_path: Optional[str] = None,
+    ignore_degenerate: bool = True,
 ) -> xe.Regridder:
     """Build an xESMF regridder between the ORAS5 and MITgcm grids.
 
@@ -248,6 +273,9 @@ def build_regridder(
     weights_path : str, optional
         If provided, path to a weight file for reusing weights.  The file
         is read when existing and written otherwise.
+    ignore_degenerate : bool, default True
+        If True, instruct ESMF to ignore degenerate cells in the source
+        grid (e.g., NaN or duplicated coordinates) when building weights.
 
     Returns
     -------
@@ -255,13 +283,17 @@ def build_regridder(
         Configured regridder object.
     """
     # Build minimal xarray datasets required by xESMF
+    src_lon = nav_lon.data
+    src_lat = nav_lat.data
+    src_mask = np.isfinite(src_lon) & np.isfinite(src_lat)
     ds_in = xr.Dataset({
-        "lon": (nav_lon.dims, nav_lon),
-        "lat": (nav_lat.dims, nav_lat),
+        "lon": (nav_lon.dims, src_lon),
+        "lat": (nav_lat.dims, src_lat),
+        "mask": (nav_lon.dims, src_mask.astype(np.int8)),
     })
     ds_out = xr.Dataset({
-        "lon": (XC.dims, XC),
-        "lat": (YC.dims, YC),
+        "lon": (XC.dims, XC.data),
+        "lat": (YC.dims, YC.data),
     })
     if periodic is None:
         # Determine periodicity: True if full 360° coverage
@@ -283,8 +315,69 @@ def build_regridder(
         periodic=periodic,
         filename=filename,
         reuse_weights=reuse,
+        ignore_degenerate=ignore_degenerate,
     )
     return regridder
+
+
+def subset_oras_to_target(
+    sal_da: xr.DataArray,
+    temp_da: xr.DataArray,
+    nav_lon: xr.DataArray,
+    nav_lat: xr.DataArray,
+    XC: xr.DataArray,
+    YC: xr.DataArray,
+    margin_deg: float = 1.0,
+) -> tuple[xr.DataArray, xr.DataArray, xr.DataArray, xr.DataArray]:
+    """Subset ORAS5 data to a bounding box around the target grid.
+
+    Parameters
+    ----------
+    sal_da, temp_da : xr.DataArray
+        ORAS5 salinity and temperature (time, depth, y, x).
+    nav_lon, nav_lat : xr.DataArray
+        ORAS5 longitude/latitude on the native grid (y, x).
+    XC, YC : xr.DataArray
+        MITgcm target longitude/latitude grids (Y, X).
+    margin_deg : float, default 1.0
+        Degrees to expand the target bounding box on each side.
+
+    Returns
+    -------
+    tuple of xr.DataArray
+        (sal_subset, temp_subset, nav_lon_subset, nav_lat_subset).
+    """
+    lon_min = float(XC.min()) - margin_deg
+    lon_max = float(XC.max()) + margin_deg
+    lat_min = float(YC.min()) - margin_deg
+    lat_max = float(YC.max()) + margin_deg
+    mask = (
+        (nav_lon >= lon_min)
+        & (nav_lon <= lon_max)
+        & (nav_lat >= lat_min)
+        & (nav_lat <= lat_max)
+    )
+    if not np.any(mask):
+        logging.warning("No ORAS5 points found within target bounding box; skipping subsetting.")
+        return sal_da, temp_da, nav_lon, nav_lat
+    y_idx, x_idx = np.where(mask)
+    y_min, y_max = int(y_idx.min()), int(y_idx.max())
+    x_min, x_max = int(x_idx.min()), int(x_idx.max())
+    y_dim, x_dim = nav_lon.dims
+    logging.info(
+        "Subsetting ORAS5 grid to y=%s:%s, x=%s:%s (margin=%s°)",
+        y_min,
+        y_max,
+        x_min,
+        x_max,
+        margin_deg,
+    )
+    subset_sel = {y_dim: slice(y_min, y_max + 1), x_dim: slice(x_min, x_max + 1)}
+    sal_sub = sal_da.isel(subset_sel)
+    temp_sub = temp_da.isel(subset_sel)
+    nav_lon_sub = nav_lon.isel(subset_sel)
+    nav_lat_sub = nav_lat.isel(subset_sel)
+    return sal_sub, temp_sub, nav_lon_sub, nav_lat_sub
 
 
 def regrid_horizontal(
@@ -377,31 +470,34 @@ def interpolate_column(
         return np.full_like(z_mit, np.nan, dtype=float)
     z_valid = z_oras[valid]
     v_valid = values[valid]
+    sort_idx = np.argsort(z_valid)
+    z_sorted = z_valid[sort_idx]
+    v_sorted = v_valid[sort_idx]
     # If there's only one valid point, replicate it everywhere
-    if v_valid.size == 1:
-        out = np.full_like(z_mit, v_valid[0], dtype=float)
+    if v_sorted.size == 1:
+        out = np.full_like(z_mit, v_sorted[0], dtype=float)
     else:
         try:
-            interp_func = PchipInterpolator(z_valid, v_valid, extrapolate=True)
+            interp_func = PchipInterpolator(z_sorted, v_sorted, extrapolate=True)
         except Exception:
             # Fallback to linear
             interp_func = interp1d(
-                z_valid,
-                v_valid,
+                z_sorted,
+                v_sorted,
                 kind="linear",
                 bounds_error=False,
-                fill_value=(v_valid[0], v_valid[-1]),
+                fill_value=(v_sorted[0], v_sorted[-1]),
             )
         out = interp_func(z_mit)
     if clamp_bottom:
         # Clamp values below the deepest observation to the deepest value
-        deepest_depth = z_valid.max()
-        deepest_val = v_valid[-1]
+        deepest_depth = z_sorted[-1]
+        deepest_val = v_sorted[-1]
         mask = z_mit > deepest_depth
         out = np.where(mask, deepest_val, out)
         # Clamp above the shallowest to the shallowest value
-        shallowest_depth = z_valid.min()
-        shallowest_val = v_valid[0]
+        shallowest_depth = z_sorted[0]
+        shallowest_val = v_sorted[0]
         mask_top = z_mit < shallowest_depth
         out = np.where(mask_top, shallowest_val, out)
     return out
@@ -584,6 +680,31 @@ def main() -> None:
     parser.add_argument("--oras-t-file", required=True, help="Path to ORAS5 temperature file")
     parser.add_argument("--grid-file", required=True, help="Path to MITgcm grid file")
     parser.add_argument("--time-index", type=int, default=0, help="Time index to extract from ORAS5")
+    parser.add_argument(
+        "--oras-chunks",
+        nargs=3,
+        type=int,
+        metavar=("Y", "X", "DEPTH"),
+        help="Optional ORAS5 chunk sizes for (y x deptht).",
+    )
+    parser.add_argument(
+        "--no-dask-chunks",
+        action="store_true",
+        help="Disable dask chunking when opening ORAS5 files.",
+    )
+    parser.add_argument(
+        "--subset-margin",
+        type=float,
+        default=1.0,
+        help="Degrees to expand target bbox when subsetting ORAS5 data.",
+    )
+    parser.add_argument(
+        "--verbose",
+        type=int,
+        choices=[0, 1, 2],
+        default=1,
+        help="Verbosity level: 0=warnings, 1=info, 2=debug",
+    )
     parser.add_argument("--out-nc", required=True, help="Output NetCDF file path")
     parser.add_argument("--out-bin-theta", required=True, help="Output MITgcm binary path for temperature")
     parser.add_argument("--out-bin-salt", required=True, help="Output MITgcm binary path for salinity")
@@ -593,12 +714,18 @@ def main() -> None:
         help="Optional path to xESMF weights file for regridding",
     )
     args = parser.parse_args()
-    configure_logging()
+    configure_logging(args.verbose)
     # Load grid
     XC, YC, RC, HFacC = load_grid(args.grid_file)
     # Load ORAS5 variables
-    sal_da = load_oras(args.oras_s_file, "vosaline")
-    temp_da = load_oras(args.oras_t_file, "votemper")
+    # Chunking controls for ORAS5 inputs: user override or disable dask chunks.
+    oras_chunks = None
+    if args.oras_chunks:
+        # Map CLI order (Y, X, DEPTH) to ORAS5 dimension names.
+        oras_chunks = {"y": args.oras_chunks[0], "x": args.oras_chunks[1], "deptht": args.oras_chunks[2]}
+    use_dask_chunks = not args.no_dask_chunks
+    sal_da = load_oras(args.oras_s_file, "vosaline", chunks=oras_chunks, use_dask_chunks=use_dask_chunks)
+    temp_da = load_oras(args.oras_t_file, "votemper", chunks=oras_chunks, use_dask_chunks=use_dask_chunks)
     # Align longitudes
     nav_lon = sal_da.coords.get("nav_lon")
     nav_lat = sal_da.coords.get("nav_lat")
@@ -609,9 +736,34 @@ def main() -> None:
     if nav_lon is None or nav_lat is None:
         raise KeyError("Could not find nav_lon/nav_lat coordinates in ORAS5 file")
     nav_lon_shifted = unify_longitude(nav_lon, XC)
+    sal_da, temp_da, nav_lon_shifted, nav_lat = subset_oras_to_target(
+        sal_da,
+        temp_da,
+        nav_lon_shifted,
+        nav_lat,
+        XC,
+        YC,
+        margin_deg=args.subset_margin,
+    )
     # Build regridders
-    bilinear = build_regridder(nav_lon_shifted, nav_lat, XC, YC, method="bilinear", periodic=None, weights_path=args.weights)
-    nearest = build_regridder(nav_lon_shifted, nav_lat, XC, YC, method="nearest_s2d", periodic=None, weights_path=None)
+    bilinear = build_regridder(
+        nav_lon_shifted,
+        nav_lat,
+        XC,
+        YC,
+        method="bilinear",
+        periodic=None,
+        weights_path=args.weights,
+    )
+    nearest = build_regridder(
+        nav_lon_shifted,
+        nav_lat,
+        XC,
+        YC,
+        method="nearest_s2d",
+        periodic=None,
+        weights_path=None,
+    )
     # Extract the requested time index
     sal_t = sal_da.isel({sal_da.dims[0]: args.time_index})
     temp_t = temp_da.isel({temp_da.dims[0]: args.time_index})
