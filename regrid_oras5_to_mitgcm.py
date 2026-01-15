@@ -235,6 +235,7 @@ def build_regridder(
     method: str = "bilinear",
     periodic: Optional[bool] = None,
     weights_path: Optional[str] = None,
+    ignore_degenerate: bool = True,
 ) -> xe.Regridder:
     """Build an xESMF regridder between the ORAS5 and MITgcm grids.
 
@@ -253,6 +254,9 @@ def build_regridder(
     weights_path : str, optional
         If provided, path to a weight file for reusing weights.  The file
         is read when existing and written otherwise.
+    ignore_degenerate : bool, default True
+        If True, instruct ESMF to ignore degenerate cells in the source
+        grid (e.g., NaN or duplicated coordinates) when building weights.
 
     Returns
     -------
@@ -288,6 +292,7 @@ def build_regridder(
         periodic=periodic,
         filename=filename,
         reuse_weights=reuse,
+        ignore_degenerate=ignore_degenerate,
     )
     return regridder
 
