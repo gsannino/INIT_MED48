@@ -109,7 +109,12 @@ def configure_logging(verbosity: int = 1) -> None:
     )
 
 
-def load_oras(file_path: str, variable_name: str, chunks: Optional[dict] = None) -> xr.DataArray:
+def load_oras(
+    file_path: str,
+    variable_name: str,
+    chunks: Optional[dict] = None,
+    use_dask_chunks: bool = True,
+) -> xr.DataArray:
     """Load an ORAS5 variable as an xarray DataArray.
 
     Parameters
@@ -121,6 +126,9 @@ def load_oras(file_path: str, variable_name: str, chunks: Optional[dict] = None)
     chunks : dict, optional
         Dictionary of chunks for dask.  If None, a default chunking
         scheme is used when dask is available.
+    use_dask_chunks : bool, default True
+        If False, disable chunking and load the dataset without dask
+        chunks to avoid performance warnings from mismatched chunks.
 
     Returns
     -------
@@ -134,9 +142,11 @@ def load_oras(file_path: str, variable_name: str, chunks: Optional[dict] = None)
             f"ORAS5 file not found: {file_path}. "
             "Please verify the path passed via --oras-s-file/--oras-t-file."
         )
-    if chunks is None and DASK_AVAILABLE:
+    if chunks is None and DASK_AVAILABLE and use_dask_chunks:
         # Reasonable defaults; these can be tuned based on typical ORAS5
         chunks = {"x": 200, "y": 200, "deptht": 75}
+    elif not use_dask_chunks:
+        chunks = None
     logging.info(f"Opening ORAS5 file {file_path} for variable {variable_name}")
     ds = xr.open_dataset(
         file_path,
@@ -610,6 +620,18 @@ def main() -> None:
     parser.add_argument("--grid-file", required=True, help="Path to MITgcm grid file")
     parser.add_argument("--time-index", type=int, default=0, help="Time index to extract from ORAS5")
     parser.add_argument(
+        "--oras-chunks",
+        nargs=3,
+        type=int,
+        metavar=("Y", "X", "DEPTH"),
+        help="Optional ORAS5 chunk sizes for (y x deptht).",
+    )
+    parser.add_argument(
+        "--no-dask-chunks",
+        action="store_true",
+        help="Disable dask chunking when opening ORAS5 files.",
+    )
+    parser.add_argument(
         "--verbose",
         type=int,
         choices=[0, 1, 2],
@@ -636,8 +658,12 @@ def main() -> None:
     # Load grid
     XC, YC, RC, HFacC = load_grid(args.grid_file)
     # Load ORAS5 variables
-    sal_da = load_oras(args.oras_s_file, "vosaline")
-    temp_da = load_oras(args.oras_t_file, "votemper")
+    oras_chunks = None
+    if args.oras_chunks:
+        oras_chunks = {"y": args.oras_chunks[0], "x": args.oras_chunks[1], "deptht": args.oras_chunks[2]}
+    use_dask_chunks = not args.no_dask_chunks
+    sal_da = load_oras(args.oras_s_file, "vosaline", chunks=oras_chunks, use_dask_chunks=use_dask_chunks)
+    temp_da = load_oras(args.oras_t_file, "votemper", chunks=oras_chunks, use_dask_chunks=use_dask_chunks)
     # Align longitudes
     nav_lon = sal_da.coords.get("nav_lon")
     nav_lat = sal_da.coords.get("nav_lat")
