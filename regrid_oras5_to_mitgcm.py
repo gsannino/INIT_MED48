@@ -121,6 +121,11 @@ def load_oras(file_path: str, variable_name: str, chunks: Optional[dict] = None)
         depth dimensions ordered as (time, depth, y, x).  Missing
         values are converted to NaN.
     """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(
+            f"ORAS5 file not found: {file_path}. "
+            "Please verify the path passed via --oras-s-file/--oras-t-file."
+        )
     if chunks is None and DASK_AVAILABLE:
         # Reasonable defaults; these can be tuned based on typical ORAS5
         chunks = {"x": 200, "y": 200, "deptht": 75}
