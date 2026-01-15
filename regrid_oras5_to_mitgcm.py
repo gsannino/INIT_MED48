@@ -283,8 +283,8 @@ def build_regridder(
         Configured regridder object.
     """
     # Build minimal xarray datasets required by xESMF
-    src_lon = nav_lon.data
-    src_lat = nav_lat.data
+    src_lon = np.asfortranarray(nav_lon.data)
+    src_lat = np.asfortranarray(nav_lat.data)
     src_mask = np.isfinite(src_lon) & np.isfinite(src_lat)
     ds_in = xr.Dataset({
         "lon": (nav_lon.dims, src_lon),
@@ -292,8 +292,8 @@ def build_regridder(
         "mask": (nav_lon.dims, src_mask.astype(np.int8)),
     })
     ds_out = xr.Dataset({
-        "lon": (XC.dims, XC.data),
-        "lat": (YC.dims, YC.data),
+        "lon": (XC.dims, np.asfortranarray(XC.data)),
+        "lat": (YC.dims, np.asfortranarray(YC.data)),
     })
     if periodic is None:
         # Determine periodicity: True if full 360° coverage
