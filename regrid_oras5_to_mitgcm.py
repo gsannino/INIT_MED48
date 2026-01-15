@@ -92,10 +92,18 @@ import xesmf as xe
 from scipy.interpolate import PchipInterpolator, interp1d
 
 
-def configure_logging() -> None:
-    """Configure a basic logger for console output."""
+def configure_logging(verbosity: int = 1) -> None:
+    """Configure a basic logger for console output.
+
+    Parameters
+    ----------
+    verbosity : int, default 1
+        Verbosity level: 0 = warnings only, 1 = info, 2 = debug.
+    """
+    level_map = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+    level = level_map.get(verbosity, logging.INFO)
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(asctime)s %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -121,6 +129,11 @@ def load_oras(file_path: str, variable_name: str, chunks: Optional[dict] = None)
         depth dimensions ordered as (time, depth, y, x).  Missing
         values are converted to NaN.
     """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(
+            f"ORAS5 file not found: {file_path}. "
+            "Please verify the path passed via --oras-s-file/--oras-t-file."
+        )
     if chunks is None and DASK_AVAILABLE:
         # Reasonable defaults; these can be tuned based on typical ORAS5
         chunks = {"x": 200, "y": 200, "deptht": 75}
@@ -230,6 +243,8 @@ def build_regridder(
     method: str = "bilinear",
     periodic: Optional[bool] = None,
     weights_path: Optional[str] = None,
+    ignore_degenerate: bool = True,
+    output_chunks: Optional[dict] = None,
 ) -> xe.Regridder:
     """Build an xESMF regridder between the ORAS5 and MITgcm grids.
 
@@ -248,6 +263,12 @@ def build_regridder(
     weights_path : str, optional
         If provided, path to a weight file for reusing weights.  The file
         is read when existing and written otherwise.
+    ignore_degenerate : bool, default True
+        If True, instruct ESMF to ignore degenerate cells in the source
+        grid (e.g., NaN or duplicated coordinates) when building weights.
+    output_chunks : dict, optional
+        Optional chunk sizes for the regridded output. Keys should match
+        the target grid dimension names (e.g., {"Y": 200, "X": 200}).
 
     Returns
     -------
@@ -255,13 +276,17 @@ def build_regridder(
         Configured regridder object.
     """
     # Build minimal xarray datasets required by xESMF
+    src_lon = nav_lon.data
+    src_lat = nav_lat.data
+    src_mask = np.isfinite(src_lon) & np.isfinite(src_lat)
     ds_in = xr.Dataset({
-        "lon": (nav_lon.dims, nav_lon),
-        "lat": (nav_lat.dims, nav_lat),
+        "lon": (nav_lon.dims, src_lon),
+        "lat": (nav_lat.dims, src_lat),
+        "mask": (nav_lon.dims, src_mask.astype(np.int8)),
     })
     ds_out = xr.Dataset({
-        "lon": (XC.dims, XC),
-        "lat": (YC.dims, YC),
+        "lon": (XC.dims, XC.data),
+        "lat": (YC.dims, YC.data),
     })
     if periodic is None:
         # Determine periodicity: True if full 360° coverage
@@ -283,6 +308,8 @@ def build_regridder(
         periodic=periodic,
         filename=filename,
         reuse_weights=reuse,
+        ignore_degenerate=ignore_degenerate,
+        output_chunks=output_chunks,
     )
     return regridder
 
@@ -377,31 +404,34 @@ def interpolate_column(
         return np.full_like(z_mit, np.nan, dtype=float)
     z_valid = z_oras[valid]
     v_valid = values[valid]
+    sort_idx = np.argsort(z_valid)
+    z_sorted = z_valid[sort_idx]
+    v_sorted = v_valid[sort_idx]
     # If there's only one valid point, replicate it everywhere
-    if v_valid.size == 1:
-        out = np.full_like(z_mit, v_valid[0], dtype=float)
+    if v_sorted.size == 1:
+        out = np.full_like(z_mit, v_sorted[0], dtype=float)
     else:
         try:
-            interp_func = PchipInterpolator(z_valid, v_valid, extrapolate=True)
+            interp_func = PchipInterpolator(z_sorted, v_sorted, extrapolate=True)
         except Exception:
             # Fallback to linear
             interp_func = interp1d(
-                z_valid,
-                v_valid,
+                z_sorted,
+                v_sorted,
                 kind="linear",
                 bounds_error=False,
-                fill_value=(v_valid[0], v_valid[-1]),
+                fill_value=(v_sorted[0], v_sorted[-1]),
             )
         out = interp_func(z_mit)
     if clamp_bottom:
         # Clamp values below the deepest observation to the deepest value
-        deepest_depth = z_valid.max()
-        deepest_val = v_valid[-1]
+        deepest_depth = z_sorted[-1]
+        deepest_val = v_sorted[-1]
         mask = z_mit > deepest_depth
         out = np.where(mask, deepest_val, out)
         # Clamp above the shallowest to the shallowest value
-        shallowest_depth = z_valid.min()
-        shallowest_val = v_valid[0]
+        shallowest_depth = z_sorted[0]
+        shallowest_val = v_sorted[0]
         mask_top = z_mit < shallowest_depth
         out = np.where(mask_top, shallowest_val, out)
     return out
@@ -584,16 +614,30 @@ def main() -> None:
     parser.add_argument("--oras-t-file", required=True, help="Path to ORAS5 temperature file")
     parser.add_argument("--grid-file", required=True, help="Path to MITgcm grid file")
     parser.add_argument("--time-index", type=int, default=0, help="Time index to extract from ORAS5")
+    parser.add_argument(
+        "--verbose",
+        type=int,
+        choices=[0, 1, 2],
+        default=1,
+        help="Verbosity level: 0=warnings, 1=info, 2=debug",
+    )
     parser.add_argument("--out-nc", required=True, help="Output NetCDF file path")
     parser.add_argument("--out-bin-theta", required=True, help="Output MITgcm binary path for temperature")
     parser.add_argument("--out-bin-salt", required=True, help="Output MITgcm binary path for salinity")
+    parser.add_argument(
+        "--output-chunks",
+        nargs=2,
+        type=int,
+        metavar=("Y", "X"),
+        help="Optional output chunk sizes for regridding (target grid Y X)",
+    )
     parser.add_argument(
         "--weights",
         default=None,
         help="Optional path to xESMF weights file for regridding",
     )
     args = parser.parse_args()
-    configure_logging()
+    configure_logging(args.verbose)
     # Load grid
     XC, YC, RC, HFacC = load_grid(args.grid_file)
     # Load ORAS5 variables
@@ -610,8 +654,32 @@ def main() -> None:
         raise KeyError("Could not find nav_lon/nav_lat coordinates in ORAS5 file")
     nav_lon_shifted = unify_longitude(nav_lon, XC)
     # Build regridders
-    bilinear = build_regridder(nav_lon_shifted, nav_lat, XC, YC, method="bilinear", periodic=None, weights_path=args.weights)
-    nearest = build_regridder(nav_lon_shifted, nav_lat, XC, YC, method="nearest_s2d", periodic=None, weights_path=None)
+    output_chunks = None
+    if args.output_chunks:
+        output_chunks = {
+            YC.dims[0]: args.output_chunks[0],
+            XC.dims[1]: args.output_chunks[1],
+        }
+    bilinear = build_regridder(
+        nav_lon_shifted,
+        nav_lat,
+        XC,
+        YC,
+        method="bilinear",
+        periodic=None,
+        weights_path=args.weights,
+        output_chunks=output_chunks,
+    )
+    nearest = build_regridder(
+        nav_lon_shifted,
+        nav_lat,
+        XC,
+        YC,
+        method="nearest_s2d",
+        periodic=None,
+        weights_path=None,
+        output_chunks=output_chunks,
+    )
     # Extract the requested time index
     sal_t = sal_da.isel({sal_da.dims[0]: args.time_index})
     temp_t = temp_da.isel({temp_da.dims[0]: args.time_index})
