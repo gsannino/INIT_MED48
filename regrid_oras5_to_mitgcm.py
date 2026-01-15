@@ -92,10 +92,18 @@ import xesmf as xe
 from scipy.interpolate import PchipInterpolator, interp1d
 
 
-def configure_logging() -> None:
-    """Configure a basic logger for console output."""
+def configure_logging(verbosity: int = 1) -> None:
+    """Configure a basic logger for console output.
+
+    Parameters
+    ----------
+    verbosity : int, default 1
+        Verbosity level: 0 = warnings only, 1 = info, 2 = debug.
+    """
+    level_map = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+    level = level_map.get(verbosity, logging.INFO)
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(asctime)s %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -606,6 +614,13 @@ def main() -> None:
     parser.add_argument("--oras-t-file", required=True, help="Path to ORAS5 temperature file")
     parser.add_argument("--grid-file", required=True, help="Path to MITgcm grid file")
     parser.add_argument("--time-index", type=int, default=0, help="Time index to extract from ORAS5")
+    parser.add_argument(
+        "--verbose",
+        type=int,
+        choices=[0, 1, 2],
+        default=1,
+        help="Verbosity level: 0=warnings, 1=info, 2=debug",
+    )
     parser.add_argument("--out-nc", required=True, help="Output NetCDF file path")
     parser.add_argument("--out-bin-theta", required=True, help="Output MITgcm binary path for temperature")
     parser.add_argument("--out-bin-salt", required=True, help="Output MITgcm binary path for salinity")
@@ -622,7 +637,7 @@ def main() -> None:
         help="Optional path to xESMF weights file for regridding",
     )
     args = parser.parse_args()
-    configure_logging()
+    configure_logging(args.verbose)
     # Load grid
     XC, YC, RC, HFacC = load_grid(args.grid_file)
     # Load ORAS5 variables
