@@ -579,6 +579,28 @@ def apply_hfac_mask(data: xr.DataArray, HFacC: xr.DataArray) -> xr.DataArray:
     return data
 
 
+def align_hfacc_to_data(data: xr.DataArray, HFacC: xr.DataArray) -> xr.DataArray:
+    """Align HFacC to the data grid by slicing extra points if needed."""
+    hfac_aligned = HFacC
+    for dim in data.dims:
+        if dim in hfac_aligned.dims:
+            data_size = data.sizes[dim]
+            hfac_size = hfac_aligned.sizes[dim]
+            if hfac_size != data_size:
+                if hfac_size < data_size:
+                    raise ValueError(
+                        f"HFacC dimension {dim} is smaller ({hfac_size}) than data ({data_size})"
+                    )
+                logging.warning(
+                    "Aligning HFacC dim %s from %s to %s by slicing.",
+                    dim,
+                    hfac_size,
+                    data_size,
+                )
+                hfac_aligned = hfac_aligned.isel({dim: slice(0, data_size)})
+    return hfac_aligned
+
+
 def report_stats(stage: str, da: xr.DataArray) -> None:
     """Print basic statistics for a DataArray.
 
@@ -785,21 +807,22 @@ def main() -> None:
     sal_v = interp_vertical(sal_h, z_oras, RC, HFacC, varname="salt")
     temp_v = interp_vertical(temp_h, z_oras, RC, HFacC, varname="theta")
     # Apply HFacC mask
-    sal_masked = apply_hfac_mask(sal_v, HFacC)
-    temp_masked = apply_hfac_mask(temp_v, HFacC)
+    HFacC_aligned = align_hfacc_to_data(sal_v, HFacC)
+    sal_masked = apply_hfac_mask(sal_v, HFacC_aligned)
+    temp_masked = apply_hfac_mask(temp_v, HFacC_aligned)
     # Report stats after vertical interpolation and masking
     report_stats("Salinity after vertical interpolation", sal_masked)
     report_stats("Temperature after vertical interpolation", temp_masked)
     # Verify shapes
-    expected_shape = HFacC.shape
+    expected_shape = HFacC_aligned.shape
     if sal_masked.shape != expected_shape:
         raise ValueError(f"Salinity shape {sal_masked.shape} does not match expected {expected_shape}")
     if temp_masked.shape != expected_shape:
         raise ValueError(f"Temperature shape {temp_masked.shape} does not match expected {expected_shape}")
     # Write outputs
     write_netcdf(args.out_nc, temp_masked, sal_masked)
-    write_mitgcm_bin(args.out_bin_theta, temp_masked, HFacC)
-    write_mitgcm_bin(args.out_bin_salt, sal_masked, HFacC)
+    write_mitgcm_bin(args.out_bin_theta, temp_masked, HFacC_aligned)
+    write_mitgcm_bin(args.out_bin_salt, sal_masked, HFacC_aligned)
     logging.info("Regridding complete")
 
 
