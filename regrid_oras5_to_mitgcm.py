@@ -642,6 +642,13 @@ def main() -> None:
     parser.add_argument("--out-bin-theta", required=True, help="Output MITgcm binary path for temperature")
     parser.add_argument("--out-bin-salt", required=True, help="Output MITgcm binary path for salinity")
     parser.add_argument(
+        "--output-chunks",
+        nargs=2,
+        type=int,
+        metavar=("Y", "X"),
+        help="Optional output chunk sizes for regridding (target grid Y X)",
+    )
+    parser.add_argument(
         "--weights",
         default=None,
         help="Optional path to xESMF weights file for regridding",
