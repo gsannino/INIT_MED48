@@ -261,12 +261,12 @@ def build_regridder(
     """
     # Build minimal xarray datasets required by xESMF
     ds_in = xr.Dataset({
-        "lon": (nav_lon.dims, nav_lon),
-        "lat": (nav_lat.dims, nav_lat),
+        "lon": (nav_lon.dims, nav_lon.data),
+        "lat": (nav_lat.dims, nav_lat.data),
     })
     ds_out = xr.Dataset({
-        "lon": (XC.dims, XC),
-        "lat": (YC.dims, YC),
+        "lon": (XC.dims, XC.data),
+        "lat": (YC.dims, YC.data),
     })
     if periodic is None:
         # Determine periodicity: True if full 360° coverage
