@@ -89,7 +89,7 @@ except ImportError:
     DASK_AVAILABLE = False
 
 import xesmf as xe
-from scipy.interpolate import PchipInterpolator, interp1d
+from scipy.interpolate import interp1d
 
 
 def configure_logging(verbosity: int = 1) -> None:
@@ -441,9 +441,8 @@ def interpolate_column(
     A helper for :func:`interp_vertical`.  Given a one‑dimensional
     vertical profile defined at depths ``z_oras`` with values ``values``,
     return the values interpolated at depths ``z_mit``.  The function
-    removes NaNs, constructs a monotonic PCHIP interpolator if
-    possible, falls back to linear interpolation otherwise, and
-    clamps the extrapolation at the bottom to the deepest valid value.
+    removes NaNs, performs linear interpolation, and clamps the
+    extrapolation at the bottom to the deepest valid value.
 
     Parameters
     ----------
