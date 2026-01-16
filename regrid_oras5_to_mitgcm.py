@@ -476,13 +476,17 @@ def interpolate_column(
     if v_sorted.size == 1:
         out = np.full_like(z_mit, v_sorted[0], dtype=float)
     else:
-        interp_func = interp1d(
-            z_sorted,
-            v_sorted,
-            kind="linear",
-            bounds_error=False,
-            fill_value=(v_sorted[0], v_sorted[-1]),
-        )
+        try:
+            interp_func = PchipInterpolator(z_sorted, v_sorted, extrapolate=True)
+        except Exception:
+            # Fallback to linear
+            interp_func = interp1d(
+                z_sorted,
+                v_sorted,
+                kind="linear",
+                bounds_error=False,
+                fill_value=(v_sorted[0], v_sorted[-1]),
+            )
         out = interp_func(z_mit)
     if clamp_bottom:
         # Clamp values below the deepest observation to the deepest value
@@ -576,25 +580,23 @@ def apply_hfac_mask(data: xr.DataArray, HFacC: xr.DataArray) -> xr.DataArray:
 
 def align_hfacc_to_data(data: xr.DataArray, HFacC: xr.DataArray) -> xr.DataArray:
     """Align HFacC to the data grid by slicing extra points if needed."""
-    if HFacC.ndim != data.ndim:
-        raise ValueError(f"HFacC has {HFacC.ndim} dims but data has {data.ndim} dims")
     hfac_aligned = HFacC
-    for axis, data_dim in enumerate(data.dims):
-        data_size = data.sizes[data_dim]
-        hfac_dim = hfac_aligned.dims[axis]
-        hfac_size = hfac_aligned.sizes[hfac_dim]
-        if hfac_size != data_size:
-            if hfac_size < data_size:
-                raise ValueError(
-                    f"HFacC dimension {hfac_dim} is smaller ({hfac_size}) than data ({data_size})"
+    for dim in data.dims:
+        if dim in hfac_aligned.dims:
+            data_size = data.sizes[dim]
+            hfac_size = hfac_aligned.sizes[dim]
+            if hfac_size != data_size:
+                if hfac_size < data_size:
+                    raise ValueError(
+                        f"HFacC dimension {dim} is smaller ({hfac_size}) than data ({data_size})"
+                    )
+                logging.warning(
+                    "Aligning HFacC dim %s from %s to %s by slicing.",
+                    dim,
+                    hfac_size,
+                    data_size,
                 )
-            logging.warning(
-                "Aligning HFacC dim %s from %s to %s by slicing.",
-                hfac_dim,
-                hfac_size,
-                data_size,
-            )
-            hfac_aligned = hfac_aligned.isel({hfac_dim: slice(0, data_size)})
+                hfac_aligned = hfac_aligned.isel({dim: slice(0, data_size)})
     return hfac_aligned
 
 
@@ -727,6 +729,13 @@ def main() -> None:
     parser.add_argument("--out-nc", required=True, help="Output NetCDF file path")
     parser.add_argument("--out-bin-theta", required=True, help="Output MITgcm binary path for temperature")
     parser.add_argument("--out-bin-salt", required=True, help="Output MITgcm binary path for salinity")
+    parser.add_argument(
+        "--output-chunks",
+        nargs=2,
+        type=int,
+        metavar=("Y", "X"),
+        help="Optional output chunk sizes for regridding (target grid Y X)",
+    )
     parser.add_argument(
         "--weights",
         default=None,
