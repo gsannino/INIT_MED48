@@ -626,6 +626,40 @@ def report_stats(stage: str, da: xr.DataArray) -> None:
         logging.info(f"{stage}: all values are NaN")
 
 
+def report_coord_stats(name: str, da: xr.DataArray) -> None:
+    """Report finite/NaN stats for a coordinate DataArray."""
+    arr = da.values
+    finite = np.isfinite(arr)
+    total = arr.size
+    finite_count = finite.sum()
+    nan_count = total - finite_count
+    nan_pct = 100.0 * nan_count / total
+    if finite_count > 0:
+        vmin = float(arr[finite].min())
+        vmax = float(arr[finite].max())
+        logging.info(
+            "%s: min=%.6f, max=%.6f, finite=%d/%d, NaN%%=%.2f",
+            name,
+            vmin,
+            vmax,
+            finite_count,
+            total,
+            nan_pct,
+        )
+    else:
+        logging.info("%s: all values are NaN (size=%d)", name, total)
+
+
+def report_mask_stats(stage: str, mask: xr.DataArray) -> None:
+    """Report the fraction of dry cells in an HFacC-like mask."""
+    arr = mask.values
+    total = arr.size
+    dry = np.count_nonzero(arr == 0)
+    wet = total - dry
+    dry_pct = 100.0 * dry / total
+    logging.info("%s: dry=%d, wet=%d, dry%%=%.2f", stage, dry, wet, dry_pct)
+
+
 def write_netcdf(out_nc: str, theta: xr.DataArray, salt: xr.DataArray) -> None:
     """Write the interpolated fields to a NetCDF file.
 
@@ -754,6 +788,8 @@ def main() -> None:
     use_dask_chunks = not args.no_dask_chunks
     sal_da = load_oras(args.oras_s_file, "vosaline", chunks=oras_chunks, use_dask_chunks=use_dask_chunks)
     temp_da = load_oras(args.oras_t_file, "votemper", chunks=oras_chunks, use_dask_chunks=use_dask_chunks)
+    report_stats("Salinity loaded", sal_da)
+    report_stats("Temperature loaded", temp_da)
     # Align longitudes
     nav_lon = sal_da.coords.get("nav_lon")
     nav_lat = sal_da.coords.get("nav_lat")
@@ -763,7 +799,10 @@ def main() -> None:
         nav_lat = sal_da.coords.get("latitude", None)
     if nav_lon is None or nav_lat is None:
         raise KeyError("Could not find nav_lon/nav_lat coordinates in ORAS5 file")
+    report_coord_stats("ORAS5 nav_lon (raw)", nav_lon)
+    report_coord_stats("ORAS5 nav_lat (raw)", nav_lat)
     nav_lon_shifted = unify_longitude(nav_lon, XC)
+    report_coord_stats("ORAS5 nav_lon (shifted)", nav_lon_shifted)
     sal_da, temp_da, nav_lon_shifted, nav_lat = subset_oras_to_target(
         sal_da,
         temp_da,
@@ -773,6 +812,10 @@ def main() -> None:
         YC,
         margin_deg=args.subset_margin,
     )
+    report_stats("Salinity after subsetting", sal_da)
+    report_stats("Temperature after subsetting", temp_da)
+    report_coord_stats("ORAS5 nav_lon (subset)", nav_lon_shifted)
+    report_coord_stats("ORAS5 nav_lat (subset)", nav_lat)
     # Build regridders
     bilinear = build_regridder(
         nav_lon_shifted,
@@ -807,6 +850,7 @@ def main() -> None:
     temp_v = interp_vertical(temp_h, z_oras, RC, HFacC, varname="theta")
     # Apply HFacC mask
     HFacC_aligned = align_hfacc_to_data(sal_v, HFacC)
+    report_mask_stats("HFacC mask (aligned)", HFacC_aligned)
     sal_masked = apply_hfac_mask(sal_v, HFacC_aligned)
     temp_masked = apply_hfac_mask(temp_v, HFacC_aligned)
     # Report stats after vertical interpolation and masking
